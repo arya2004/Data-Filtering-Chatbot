@@ -1,5 +1,8 @@
 import pandas as pd
-import nltk, string
+import nltk
+nltk.download('punkt')
+nltk.download('punkt_tab')
+import string
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 from sklearn.metrics import f1_score
@@ -15,7 +18,8 @@ if len(sys.argv)==2:
     df = pd.read_excel(f"{submission_name}.xlsx")
 
 
-nltk.download('punkt')
+
+
 stemmer = nltk.stem.porter.PorterStemmer()
 remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
 
