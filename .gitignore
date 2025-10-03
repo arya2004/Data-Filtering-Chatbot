@@ -87,9 +87,9 @@ target/
 # Mypy cache
 .mypy_cache/
 
-# Exclude only generated database and output files
-threads_db/
-
-# Ignore only generated results, not input data
+# Exlcude the database file
+.db
 predicted.xlsx
 output_*.csv
+
+threads_db
