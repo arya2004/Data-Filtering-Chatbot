@@ -9,13 +9,29 @@ from openpyxl import load_workbook
 import warnings
 warnings.filterwarnings('ignore')
 
-
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 PREDICTED_EXCEL_PATH = os.getenv("PREDICTED_EXCEL_PATH", "./predicted.xlsx")
 INPUT_CSV_PATH = os.getenv("INPUT_CSV_PATH", "./input_table.csv")
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# ------------------- Utility Function -------------------
+def load_input_csv(path):
+    """
+    Load a CSV file and parse the 'Date' column if it exists.
+    Returns a pandas DataFrame.
+    """
+    try:
+        df = pd.read_csv(path)
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'])
+        return df
+    except Exception as e:
+        print(f"Error loading CSV file at {path}: {e}")
+        return pd.DataFrame()
+
 
 def detect_date_columns(df):
     date_columns = []
@@ -63,6 +79,7 @@ def get_dataset_summary(df):
     
     return "\n".join(summary_parts)
 
+# ------------------- Filtering Instructions -------------------
 def get_filter_instructions(summary, question):
     extra_instructions = ""
     q_lower = question.lower()
@@ -104,9 +121,9 @@ def get_filter_instructions(summary, question):
         temperature=0.0
     )
     
-    instructions = response.choices[0].message.content
-    return instructions
+    return response.choices[0].message.content
 
+# ------------------- Final Answer -------------------
 def get_final_answer(filtered_df, filtered_summary, question):
     prompt = (
         "You are an analytical assistant. Given the filtered dataset (its complete content and summary), "
@@ -130,22 +147,17 @@ def get_final_answer(filtered_df, filtered_summary, question):
         temperature=0.0
     )
     
-    answer = response.choices[0].message.content
-    return answer
+    return response.choices[0].message.content
 
+# ------------------- Process Submission -------------------
 def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1):
-
- 
-    try:
-        df = pd.read_csv(csv_data_path)
-    except Exception as e:
-        print("Error loading CSV file:", e)
+    df = load_input_csv(csv_data_path)
+    if df.empty:
         return
     
     df, date_columns = detect_date_columns(df)
     
     full_summary = get_dataset_summary(df)
-
 
     if os.path.exists(excel_file_path):
         try:
@@ -157,11 +169,9 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
         print("Excel file not found. Creating a new submission DataFrame.")
         submission_df = pd.DataFrame(columns=["question", "row index", "column index", "answer"])
 
-
     for col in ["filtered row index", "filtered column index", "generated response"]:
         if col not in submission_df.columns:
             submission_df[col] = ""
-
 
     if dev_start == -1 and dev_end == -1:
         indices_to_process = submission_df.index.tolist()
@@ -173,19 +183,14 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
         question = row["question"]
         print(f"Processing question at index {idx}: {question}")
 
-    
         df_copy = df.copy()
-
-
         filter_instructions = get_filter_instructions(full_summary, question)
         print("LLM-provided filtering instructions:")
         print(filter_instructions)
 
-
         code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
         code_to_execute = code_match.group(1) if code_match else filter_instructions
 
-    
         try:
             local_vars = {"df": df_copy}
             exec(code_to_execute, {}, local_vars)
@@ -202,18 +207,13 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
 
         filtered_row_indices = list(filtered_df.index)
         filtered_column_indices = [df.columns.get_loc(col) for col in filtered_df.columns if col in df.columns]
-
         filtered_summary = get_dataset_summary(filtered_df)
-
-   
         generated_response = get_final_answer(filtered_df, filtered_summary, question)
 
-    
         submission_df.at[idx, "filtered row index"] = ", ".join(map(str, filtered_row_indices))
         submission_df.at[idx, "filtered column index"] = ", ".join(map(str, filtered_column_indices))
         submission_df.at[idx, "generated response"] = generated_response
 
-  
         success = False
         retries = 3
         while not success and retries > 0:
@@ -225,19 +225,16 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
             except Exception as e:
                 print(f"Error saving Excel file: {e}")
                 retries -= 1
-                time.sleep(2)  
+                time.sleep(2)
                 if retries == 0:
                     print(f"Failed to save after multiple attempts. Skipping update for index {idx}.")
 
     print("Submission processing complete.")
 
+# ------------------- Main Function -------------------
 def main():
-
-    csv_path = INPUT_CSV_PATH
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        print("Error loading CSV file:", e)
+    df = load_input_csv(INPUT_CSV_PATH)
+    if df.empty:
         return
     
     df, date_columns = detect_date_columns(df)
@@ -247,16 +244,12 @@ def main():
     print(full_summary)
 
     question = "Give me all row numbers where 10 quantities were sold"
-
-
     filter_instructions = get_filter_instructions(full_summary, question)
     print("\nLLM-provided filtering instructions:")
     print(filter_instructions)
 
-
     code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
     code_to_execute = code_match.group(1) if code_match else filter_instructions
-
 
     try:
         local_vars = {"df": df}
@@ -276,15 +269,7 @@ def main():
     print("\nFinal Answer:\n")
     print(final_answer)
 
+# ------------------- Entry Point -------------------
 if __name__ == "__main__":
-
-    # main()
-
-    excel_file_path = PREDICTED_EXCEL_PATH  
-    csv_data_path = INPUT_CSV_PATH     
-    
-
-    dev_start = -1
-    dev_end = -1
-    
-    process_submission(excel_file_path, csv_data_path, dev_start, dev_end)
+    # main()  # optional test run
+    process_submission(PREDICTED_EXCEL_PATH, INPUT_CSV_PATH)
