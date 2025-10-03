@@ -10,9 +10,11 @@ from openpyxl import load_workbook
 import warnings
 warnings.filterwarnings('ignore')
 
-
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+PREDICTED_EXCEL_PATH = os.getenv("PREDICTED_EXCEL_PATH", "./predicted.xlsx")
+INPUT_CSV_PATH = os.getenv("INPUT_CSV_PATH", "./input_table.csv")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 def load_processing_state(state_file_path):
@@ -48,9 +50,69 @@ def save_intermediate_result(results_file_path, idx, result_data):
     except (json.JSONDecodeError, IOError) as e:
         print(f"Warning: Could not save intermediate result: {e}")
 
-def get_dataset_summary(df):
-    return df.describe(include='all').to_string()
+# ------------------- Utility Function -------------------
+def load_input_csv(path):
+    """
+    Load a CSV file and parse the 'Date' column if it exists.
+    Returns a pandas DataFrame.
+    """
+    try:
+        df = pd.read_csv(path)
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'])
+        return df
+    except Exception as e:
+        print(f"Error loading CSV file at {path}: {e}")
+        return pd.DataFrame()
 
+
+def detect_date_columns(df):
+    date_columns = []
+    for col in df.columns:
+        col_lower = col.lower()
+        if any(date_word in col_lower for date_word in ['date', 'time', 'created', 'updated', 'timestamp']):
+            try:
+                df[col] = pd.to_datetime(df[col])
+                date_columns.append(col)
+            except (ValueError, TypeError):
+                pass
+        elif df[col].dtype == 'object':
+            sample_values = df[col].dropna().head(3)
+            if len(sample_values) > 0:
+                try:
+                    pd.to_datetime(sample_values.iloc[0])
+                    df[col] = pd.to_datetime(df[col])
+                    date_columns.append(col)
+                except (ValueError, TypeError):
+                    pass
+    return df, date_columns
+
+def get_dataset_summary(df):
+    summary_parts = []
+    
+    summary_parts.append(f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns")
+    
+    summary_parts.append("\nColumn Schema:")
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        null_count = df[col].isnull().sum()
+        unique_count = df[col].nunique()
+        summary_parts.append(f"  - {col}: {dtype} (nulls: {null_count}, unique: {unique_count})")
+        
+        if dtype == 'object' or 'category' in dtype:
+            sample_values = df[col].dropna().unique()[:3]
+            summary_parts.append(f"    Sample values: {list(sample_values)}")
+        elif df[col].dtype in ['int64', 'float64']:
+            min_val = df[col].min()
+            max_val = df[col].max()
+            summary_parts.append(f"    Range: {min_val} to {max_val}")
+    
+    summary_parts.append("\nStatistical Summary:")
+    summary_parts.append(df.describe(include='all').to_string())
+    
+    return "\n".join(summary_parts)
+
+# ------------------- Filtering Instructions -------------------
 def get_filter_instructions(summary, question):
     extra_instructions = ""
     q_lower = question.lower()
@@ -69,28 +131,32 @@ def get_filter_instructions(summary, question):
     
     prompt = (
         "You are an assistant that helps filter a dataset based on a user query.\n"
-        "You are given the dataset summary below:\n\n"
+        "You have access to a dataset with the following schema and summary:\n\n"
         f"{summary}\n\n"
-        "And the following question:\n"
+        "IMPORTANT: Use the exact column names shown in the schema above. "
+        "Pay attention to data types for appropriate comparisons.\n\n"
+        "Question to answer:\n"
         f"\"{question}\"\n\n"
         f"{extra_instructions}"
-        "Return only a Python code snippet that, when executed, filters the dataframe "
-        "(named 'df') to only include the relevant rows and columns for this query. "
-        "For example, if the answer required filtering rows where a column 'Age' > 30, "
-        "your code might look like: df = df[df['Age'] > 30]\n\n"
+        "Return only a Python code snippet that filters the dataframe (named 'df') "
+        "to include relevant rows and columns for this query. \n"
+        "Examples:\n"
+        "- For numeric: df = df[df['ColumnName'] > 30]\n"
+        "- For string: df = df[df['ColumnName'].str.contains('text', case=False, na=False)]\n"
+        "- For date: df = df[df['DateColumn'] > '2023-01-01']\n\n"
         "Make sure to return only the code, optionally wrapped in triple backticks."
     )
     
     response = client.chat.completions.create(
-        model="gpt-4o-mini",  
+        model=OPENAI_MODEL,  
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150,
         temperature=0.0
     )
     
-    instructions = response.choices[0].message.content
-    return instructions
+    return response.choices[0].message.content
 
+# ------------------- Final Answer -------------------
 def get_final_answer(filtered_df, filtered_summary, question):
     prompt = (
         "You are an analytical assistant. Given the filtered dataset (its complete content and summary), "
@@ -108,32 +174,23 @@ def get_final_answer(filtered_df, filtered_summary, question):
     )
     
     response = client.chat.completions.create(
-        model="gpt-4o-mini", 
+        model=OPENAI_MODEL, 
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150,
         temperature=0.0
     )
     
-    answer = response.choices[0].message.content
-    return answer
+    return response.choices[0].message.content
 
+# ------------------- Process Submission -------------------
 def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1):
-    # Setup state management files
-    base_name = os.path.splitext(excel_file_path)[0]
-    state_file_path = f"{base_name}_processing_state.json"
-    results_file_path = f"{base_name}_intermediate_results.json"
-    
-    try:
-        df = pd.read_csv(csv_data_path)
-    except Exception as e:
-        print("Error loading CSV file:", e)
+    df = load_input_csv(csv_data_path)
+    if df.empty:
         return
     
-    if 'Date' in df.columns:
-        df['Date'] = pd.to_datetime(df['Date'])
+    df, date_columns = detect_date_columns(df)
     
     full_summary = get_dataset_summary(df)
-
 
     if os.path.exists(excel_file_path):
         try:
@@ -144,7 +201,6 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
     else:
         print("Excel file not found. Creating a new submission DataFrame.")
         submission_df = pd.DataFrame(columns=["question", "row index", "column index", "answer"])
-
 
     for col in ["filtered row index", "filtered column index", "generated response"]:
         if col not in submission_df.columns:
@@ -178,11 +234,9 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
         print("LLM-provided filtering instructions:")
         print(filter_instructions)
 
-
         code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
         code_to_execute = code_match.group(1) if code_match else filter_instructions
 
-    
         try:
             local_vars = {"df": df_copy}
             exec(code_to_execute, {}, local_vars)
@@ -258,33 +312,25 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
 
     print("Submission processing complete.")
 
+# ------------------- Main Function -------------------
 def main():
-
-    csv_path = "./input_table.csv"
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        print("Error loading CSV file:", e)
+    df = load_input_csv(INPUT_CSV_PATH)
+    if df.empty:
         return
     
-    if 'Date' in df.columns:
-        df['Date'] = pd.to_datetime(df['Date'])
+    df, date_columns = detect_date_columns(df)
     
     full_summary = get_dataset_summary(df)
     print("\nFull Dataset Summary:\n")
     print(full_summary)
 
     question = "Give me all row numbers where 10 quantities were sold"
-
-
     filter_instructions = get_filter_instructions(full_summary, question)
     print("\nLLM-provided filtering instructions:")
     print(filter_instructions)
 
-
     code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
     code_to_execute = code_match.group(1) if code_match else filter_instructions
-
 
     try:
         local_vars = {"df": df}
@@ -304,15 +350,7 @@ def main():
     print("\nFinal Answer:\n")
     print(final_answer)
 
+# ------------------- Entry Point -------------------
 if __name__ == "__main__":
-
-    # main()
-
-    excel_file_path = "./predicted.xlsx"  
-    csv_data_path = "./input_table.csv"     
-    
-
-    dev_start = -1
-    dev_end = -1
-    
-    process_submission(excel_file_path, csv_data_path, dev_start, dev_end)
+    # main()  # optional test run
+    process_submission(PREDICTED_EXCEL_PATH, INPUT_CSV_PATH)

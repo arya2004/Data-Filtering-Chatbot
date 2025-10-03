@@ -1,0 +1,6 @@
+product_id,product_name,quantity,price,sale_date
+1,Apple,10,1.50,2025-10-01
+2,Banana,5,0.75,2025-10-01
+3,Orange,10,1.25,2025-10-02
+4,Grapes,20,3.00,2025-10-02
+5,Apple,15,1.50,2025-10-03

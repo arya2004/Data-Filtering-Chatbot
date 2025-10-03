@@ -89,7 +89,7 @@ target/
 
 # Exlcude the database file
 .db
-*.csv
-*.xlsx
+predicted.xlsx
+output_*.csv
 
 threads_db
