@@ -12,6 +12,9 @@ warnings.filterwarnings('ignore')
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+PREDICTED_EXCEL_PATH = os.getenv("PREDICTED_EXCEL_PATH", "./predicted.xlsx")
+INPUT_CSV_PATH = os.getenv("INPUT_CSV_PATH", "./input_table.csv")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 def get_dataset_summary(df):
@@ -48,7 +51,7 @@ def get_filter_instructions(summary, question):
     )
     
     response = client.chat.completions.create(
-        model="gpt-4o-mini",  
+        model=OPENAI_MODEL,  
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150,
         temperature=0.0
@@ -74,7 +77,7 @@ def get_final_answer(filtered_df, filtered_summary, question):
     )
     
     response = client.chat.completions.create(
-        model="gpt-4o-mini", 
+        model=OPENAI_MODEL, 
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150,
         temperature=0.0
@@ -184,7 +187,7 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
 
 def main():
 
-    csv_path = "./input_table.csv"
+    csv_path = INPUT_CSV_PATH
     try:
         df = pd.read_csv(csv_path)
     except Exception as e:
@@ -232,8 +235,8 @@ if __name__ == "__main__":
 
     # main()
 
-    excel_file_path = "./predicted.xlsx"  
-    csv_data_path = "./input_table.csv"     
+    excel_file_path = PREDICTED_EXCEL_PATH  
+    csv_data_path = INPUT_CSV_PATH     
     
 
     dev_start = -1
