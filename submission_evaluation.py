@@ -1,16 +1,24 @@
 import pandas as pd
 import nltk
-nltk.download('punkt')
-nltk.download('punkt_tab')
 import string
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 from sklearn.metrics import f1_score
 from sklearn.preprocessing import MultiLabelBinarizer
-
 import warnings
+
 warnings.filterwarnings('ignore')
 
+
+def download_nltk_resource(resource_name, resource_type='tokenizers'):
+    try:
+        nltk.data.find(f'{resource_type}/{resource_name}')
+    except LookupError:
+        nltk.download(resource_name, quiet=True)
+
+# Download required NLTK resources only if missing
+download_nltk_resource('punkt')
+download_nltk_resource('punkt_tab')
 
 stemmer = nltk.stem.porter.PorterStemmer()
 remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
@@ -22,6 +30,7 @@ def normalize(text):
     return stem_tokens(nltk.word_tokenize(text.lower().translate(remove_punctuation_map)))
 
 vectorizer = TfidfVectorizer(tokenizer=normalize, stop_words='english')
+
 def cosine_sim(text1, text2):
     if text1 == text2:
         return 1
