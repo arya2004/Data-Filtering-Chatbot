@@ -16,6 +16,7 @@ PREDICTED_EXCEL_PATH = os.getenv("PREDICTED_EXCEL_PATH", "./predicted.xlsx")
 INPUT_CSV_PATH = os.getenv("INPUT_CSV_PATH", "./input_table.csv")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+
 # ------------------- Utility Function -------------------
 def load_input_csv(path):
     """
@@ -31,9 +32,52 @@ def load_input_csv(path):
         print(f"Error loading CSV file at {path}: {e}")
         return pd.DataFrame()
 
-# ------------------- Dataset Summary -------------------
+
+def detect_date_columns(df):
+    date_columns = []
+    for col in df.columns:
+        col_lower = col.lower()
+        if any(date_word in col_lower for date_word in ['date', 'time', 'created', 'updated', 'timestamp']):
+            try:
+                df[col] = pd.to_datetime(df[col])
+                date_columns.append(col)
+            except (ValueError, TypeError):
+                pass
+        elif df[col].dtype == 'object':
+            sample_values = df[col].dropna().head(3)
+            if len(sample_values) > 0:
+                try:
+                    pd.to_datetime(sample_values.iloc[0])
+                    df[col] = pd.to_datetime(df[col])
+                    date_columns.append(col)
+                except (ValueError, TypeError):
+                    pass
+    return df, date_columns
+
 def get_dataset_summary(df):
-    return df.describe(include='all').to_string()
+    summary_parts = []
+    
+    summary_parts.append(f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns")
+    
+    summary_parts.append("\nColumn Schema:")
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        null_count = df[col].isnull().sum()
+        unique_count = df[col].nunique()
+        summary_parts.append(f"  - {col}: {dtype} (nulls: {null_count}, unique: {unique_count})")
+        
+        if dtype == 'object' or 'category' in dtype:
+            sample_values = df[col].dropna().unique()[:3]
+            summary_parts.append(f"    Sample values: {list(sample_values)}")
+        elif df[col].dtype in ['int64', 'float64']:
+            min_val = df[col].min()
+            max_val = df[col].max()
+            summary_parts.append(f"    Range: {min_val} to {max_val}")
+    
+    summary_parts.append("\nStatistical Summary:")
+    summary_parts.append(df.describe(include='all').to_string())
+    
+    return "\n".join(summary_parts)
 
 # ------------------- Filtering Instructions -------------------
 def get_filter_instructions(summary, question):
@@ -54,15 +98,19 @@ def get_filter_instructions(summary, question):
     
     prompt = (
         "You are an assistant that helps filter a dataset based on a user query.\n"
-        "You are given the dataset summary below:\n\n"
+        "You have access to a dataset with the following schema and summary:\n\n"
         f"{summary}\n\n"
-        "And the following question:\n"
+        "IMPORTANT: Use the exact column names shown in the schema above. "
+        "Pay attention to data types for appropriate comparisons.\n\n"
+        "Question to answer:\n"
         f"\"{question}\"\n\n"
         f"{extra_instructions}"
-        "Return only a Python code snippet that, when executed, filters the dataframe "
-        "(named 'df') to only include the relevant rows and columns for this query. "
-        "For example, if the answer required filtering rows where a column 'Age' > 30, "
-        "your code might look like: df = df[df['Age'] > 30]\n\n"
+        "Return only a Python code snippet that filters the dataframe (named 'df') "
+        "to include relevant rows and columns for this query. \n"
+        "Examples:\n"
+        "- For numeric: df = df[df['ColumnName'] > 30]\n"
+        "- For string: df = df[df['ColumnName'].str.contains('text', case=False, na=False)]\n"
+        "- For date: df = df[df['DateColumn'] > '2023-01-01']\n\n"
         "Make sure to return only the code, optionally wrapped in triple backticks."
     )
     
@@ -106,6 +154,8 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
     df = load_input_csv(csv_data_path)
     if df.empty:
         return
+    
+    df, date_columns = detect_date_columns(df)
     
     full_summary = get_dataset_summary(df)
 
@@ -186,7 +236,9 @@ def main():
     df = load_input_csv(INPUT_CSV_PATH)
     if df.empty:
         return
-
+    
+    df, date_columns = detect_date_columns(df)
+    
     full_summary = get_dataset_summary(df)
     print("\nFull Dataset Summary:\n")
     print(full_summary)
