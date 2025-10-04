@@ -229,7 +229,6 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
 
             df_copy = df.copy()
 
-
             filter_instructions = get_filter_instructions(full_summary, question)
             print("LLM-provided filtering instructions:")
             print(filter_instructions)
