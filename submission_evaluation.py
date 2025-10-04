@@ -38,7 +38,7 @@ def cosine_sim(text1, text2):
     return ((tfidf * tfidf.T).toarray())[0,1]
 
 
-def filter_table_process(name, maxlen):
+def filter_table_process(df, name, maxlen):
     arr = []
     for ele in df[name].tolist():
         if isinstance(ele, str):
@@ -65,9 +65,9 @@ def filter_table_process(name, maxlen):
     return ans_arr
 
 
-def table_score_cal(row_maxlen=1000, column_maxlen=11):
-    ans_row = filter_table_process(name='row index', maxlen=row_maxlen)
-    pred_row = filter_table_process(name='filtered row index', maxlen=row_maxlen)
+def table_score_cal(df, row_maxlen=1000, column_maxlen=11):
+    ans_row = filter_table_process(df, name='row index', maxlen=row_maxlen)
+    pred_row = filter_table_process(df, name='filtered row index', maxlen=row_maxlen)
 
     new = [[ele for ele in range(1, row_maxlen+1)]]
     mlb_row = MultiLabelBinarizer()
@@ -77,8 +77,8 @@ def table_score_cal(row_maxlen=1000, column_maxlen=11):
     pred_row = mlb_row.transform(pred_row)
     row_score = f1_score(ans_row, pred_row, average='micro')
 
-    ans_columns = filter_table_process(name='column index', maxlen=column_maxlen)
-    pred_columns = filter_table_process(name='filtered column index', maxlen=column_maxlen)
+    ans_columns = filter_table_process(df, name='column index', maxlen=column_maxlen)
+    pred_columns = filter_table_process(df, name='filtered column index', maxlen=column_maxlen)
 
     new = [[ele for ele in range(1, column_maxlen+1)]]
     mlb_column = MultiLabelBinarizer()
@@ -92,7 +92,7 @@ def table_score_cal(row_maxlen=1000, column_maxlen=11):
     return table_score
 
 
-def generated_response_process():
+def generated_response_process(df):
     ans_str, ans_fl = dict(), dict()
     for idx, ele in df["answer"].items():
         try:
@@ -104,8 +104,8 @@ def generated_response_process():
     return ans_str, ans_fl
 
 
-def generated_response_score():
-    ans_str, ans_fl = generated_response_process()
+def generated_response_score(df):
+    ans_str, ans_fl = generated_response_process(df)
 
     res_fl = [str(df['generated response'].iloc[idx]) for idx in ans_fl.keys()]
     num_res_score = f1_score(res_fl, list(ans_fl.values()), average='micro') if len(res_fl) != 0 else 0
@@ -119,11 +119,9 @@ def generated_response_score():
     return res_score
 
 
-def final_score(submission_name, row_maxlen=1000, column_maxlen=11):
-    global df
-    df = pd.read_excel(f"{submission_name}.xlsx")
-    table_score = table_score_cal(row_maxlen=row_maxlen, column_maxlen=column_maxlen)
-    res_score = generated_response_score()
+def final_score(df, row_maxlen=1000, column_maxlen=11):
+    table_score = table_score_cal(df, row_maxlen=row_maxlen, column_maxlen=column_maxlen)
+    res_score = generated_response_score(df)
     print("Table Filter Score :", table_score)
     print("Generated response Score :", res_score)
     total_score = np.mean([table_score, res_score])
@@ -136,4 +134,5 @@ def final_score(submission_name, row_maxlen=1000, column_maxlen=11):
 if __name__ == "__main__":
     # Now you can call final_score with a filename directly
     submission_file = "example_submission"  # <-- replace with your actual file without .xlsx
-    final_score(submission_file, row_maxlen=1000, column_maxlen=11)
+    df = pd.read_excel(f"{submission_file}.xlsx")
+    final_score(df, row_maxlen=1000, column_maxlen=11)
