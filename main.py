@@ -5,6 +5,7 @@ import os
 import time
 from dotenv import load_dotenv
 from openpyxl import load_workbook
+import json
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -64,21 +65,6 @@ def get_dataset_summary(df):
     return "\n".join(summary_parts)
 
 def get_filter_instructions(summary, question):
-    extra_instructions = ""
-    q_lower = question.lower()
-    if "recent" in q_lower or "latest" in q_lower:
-        extra_instructions += (
-            "Note: When the question refers to 'recent' or 'latest entry', do not filter based on "
-            "the date column. Instead, select the last row of the dataframe using its original order "
-            "(e.g., use df.iloc[-1:]).\n"
-        )
-    if "early entry" in q_lower or "first entry" in q_lower or "earliest entry" in q_lower:
-        extra_instructions += (
-            "Note: When the question refers to 'early entry', 'first entry', or 'earliest entry', do not filter "
-            "based on the date column. Instead, select the first row of the dataframe using its original order "
-            "(e.g., use df.iloc[:1]).\n"
-        )
-    
     prompt = (
         "You are an assistant that helps filter a dataset based on a user query.\n"
         "You have access to a dataset with the following schema and summary:\n\n"
@@ -87,14 +73,15 @@ def get_filter_instructions(summary, question):
         "Pay attention to data types for appropriate comparisons.\n\n"
         "Question to answer:\n"
         f"\"{question}\"\n\n"
-        f"{extra_instructions}"
-        "Return only a Python code snippet that filters the dataframe (named 'df') "
-        "to include relevant rows and columns for this query. \n"
+        "Return a JSON object with the filter conditions. The JSON should have 'column', 'operator', and 'value'.\n"
+        "For special cases like 'latest' or 'first' entry, return a JSON with a 'special' key.\n"
         "Examples:\n"
-        "- For numeric: df = df[df['ColumnName'] > 30]\n"
-        "- For string: df = df[df['ColumnName'].str.contains('text', case=False, na=False)]\n"
-        "- For date: df = df[df['DateColumn'] > '2023-01-01']\n\n"
-        "Make sure to return only the code, optionally wrapped in triple backticks."
+        '- For numeric: { "column": "ColumnName", "operator": ">", "value": 30 }\n'
+        '- For string: { "column": "ColumnName", "operator": "contains", "value": "text" }\n'
+        '- For date: { "column": "DateColumn", "operator": ">", "value": "2023-01-01" }\n'
+        '- For latest entry: { "special": "latest" }\n'
+        '- For first entry: { "special": "first" }\n\n'
+        "Make sure to return only the JSON object, optionally wrapped in triple backticks."
     )
     
     response = client.chat.completions.create(
@@ -132,6 +119,53 @@ def get_final_answer(filtered_df, filtered_summary, question):
     
     answer = response.choices[0].message.content
     return answer
+
+def apply_filter(df, filter_json):
+    try:
+        # Attempt to clean and load the JSON
+        # It might be wrapped in backticks or have trailing characters
+        json_match = re.search(r'\{.*\}', filter_json, re.DOTALL)
+        if json_match:
+            clean_json = json_match.group(0)
+            filter_data = json.loads(clean_json)
+        else:
+            print("Error: No valid JSON object found in the string from LLM")
+            return df
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON from LLM after cleaning: {e}")
+        return df
+
+    if "special" in filter_data:
+        if filter_data["special"] == "latest":
+            return df.iloc[-1:]
+        elif filter_data["special"] == "first":
+            return df.iloc[:1]
+    
+    column = filter_data.get("column")
+    operator = filter_data.get("operator")
+    value = filter_data.get("value")
+
+    if not all([column, operator, value is not None]):
+        print("Error: Incomplete filter from LLM")
+        return df
+
+    if column not in df.columns:
+        print(f"Error: Column '{column}' not found in DataFrame")
+        return df
+
+    try:
+        if operator == "contains":
+            return df[df[column].str.contains(str(value), case=False, na=False)]
+        else:
+            # For numeric and date comparisons, pandas.query is safer
+            if pd.api.types.is_numeric_dtype(df[column]):
+                query_str = f"`{column}` {operator} {value}"
+            else: # Assume string or date, wrap value in quotes
+                query_str = f"`{column}` {operator} '{value}'"
+            return df.query(query_str)
+    except Exception as e:
+        print(f"Error applying filter: {e}")
+        return df
 
 def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1):
 
@@ -181,24 +215,14 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
         print("LLM-provided filtering instructions:")
         print(filter_instructions)
 
+        # Clean up the JSON string
+        json_match = re.search(r"```(?:json)?\n(.*?)```", filter_instructions, re.DOTALL)
+        if json_match:
+            filter_json = json_match.group(1)
+        else:
+            filter_json = filter_instructions
 
-        code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
-        code_to_execute = code_match.group(1) if code_match else filter_instructions
-
-    
-        try:
-            local_vars = {"df": df_copy}
-            exec(code_to_execute, {}, local_vars)
-            filtered_df = local_vars.get("df", df_copy)
-
-            if not isinstance(filtered_df, pd.DataFrame):
-                print("Warning: Filtering code did not return a DataFrame. Using original dataset.")
-                filtered_df = df_copy
-            elif isinstance(filtered_df, pd.Series):
-                filtered_df = filtered_df.to_frame().T
-        except Exception as e:
-            print("Error executing filtering code:", e)
-            filtered_df = df_copy
+        filtered_df = apply_filter(df_copy, filter_json)
 
         filtered_row_indices = list(filtered_df.index)
         filtered_column_indices = [df.columns.get_loc(col) for col in filtered_df.columns if col in df.columns]
@@ -253,20 +277,7 @@ def main():
     print("\nLLM-provided filtering instructions:")
     print(filter_instructions)
 
-
-    code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
-    code_to_execute = code_match.group(1) if code_match else filter_instructions
-
-
-    try:
-        local_vars = {"df": df}
-        exec(code_to_execute, {}, local_vars)
-        filtered_df = local_vars.get("df", df)
-        if isinstance(filtered_df, pd.Series):
-            filtered_df = filtered_df.to_frame().T
-    except Exception as e:
-        print("Error executing filtering code:", e)
-        filtered_df = df
+    filtered_df = apply_filter(df, filter_instructions)
 
     filtered_summary = get_dataset_summary(filtered_df)
     print("\nFiltered Dataset Summary:\n")
