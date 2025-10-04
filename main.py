@@ -138,13 +138,13 @@ def get_filter_instructions(summary, question):
         "Question to answer:\n"
         f"\"{question}\"\n\n"
         f"{extra_instructions}"
-        "Return only a Python code snippet that filters the dataframe (named 'df') "
-        "to include relevant rows and columns for this query. \n"
+        "Return only a JSON object that represents the filter condition. The JSON should have 'column', 'operator', and 'value'.\n"
         "Examples:\n"
-        "- For numeric: df = df[df['ColumnName'] > 30]\n"
-        "- For string: df = df[df['ColumnName'].str.contains('text', case=False, na=False)]\n"
-        "- For date: df = df[df['DateColumn'] > '2023-01-01']\n\n"
-        "Make sure to return only the code, optionally wrapped in triple backticks."
+        '- For numeric: { "column": "ColumnName", "operator": ">", "value": 30 }\n'
+        '- For string: { "column": "ColumnName", "operator": "contains", "value": "text" }\n'
+        '- For date: { "column": "DateColumn", "operator": ">", "value": "2023-01-01" }\n\n'
+        "Supported operators: >, <, ==, !=, >=, <=, contains.\n"
+        "Make sure to return only the JSON object, optionally wrapped in triple backticks."
     )
     
     response = client.chat.completions.create(
@@ -229,27 +229,39 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
 
             df_copy = df.copy()
 
+            filter_instructions = get_filter_instructions(full_summary, question)
+            print("LLM-provided filtering instructions:")
+            print(filter_instructions)
 
-        filter_instructions = get_filter_instructions(full_summary, question)
-        print("LLM-provided filtering instructions:")
-        print(filter_instructions)
+            json_match = re.search(r"```(?:json)?\n(.*?)```", filter_instructions, re.DOTALL)
+            filter_str = json_match.group(1) if json_match else filter_instructions
 
-        code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
-        code_to_execute = code_match.group(1) if code_match else filter_instructions
+            try:
+                filter_json = json.loads(filter_str)
+                col = filter_json['column']
+                op = filter_json['operator']
+                val = filter_json['value']
 
-        try:
-            local_vars = {"df": df_copy}
-            exec(code_to_execute, {}, local_vars)
-            filtered_df = local_vars.get("df", df_copy)
+                if op == 'contains':
+                    # pandas.query doesn't support str.contains, so we use a boolean mask.
+                    filtered_df = df_copy[df_copy[col].str.contains(val, case=False, na=False)]
+                else:
+                    # For dates, wrap value in quotes for the query
+                    if pd.api.types.is_datetime64_any_dtype(df_copy[col]):
+                        query_str = f"`{col}` {op} '{val}'"
+                    else:
+                        query_str = f"`{col}` {op} {val}"
+                    filtered_df = df_copy.query(query_str)
+
+            except (json.JSONDecodeError, KeyError, Exception) as e:
+                print(f"Error applying filter: {e}. Using original dataframe.")
+                filtered_df = df_copy
 
             if not isinstance(filtered_df, pd.DataFrame):
                 print("Warning: Filtering code did not return a DataFrame. Using original dataset.")
                 filtered_df = df_copy
             elif isinstance(filtered_df, pd.Series):
                 filtered_df = filtered_df.to_frame().T
-        except Exception as e:
-            print("Error executing filtering code:", e)
-            filtered_df = df_copy
 
             filtered_row_indices = list(filtered_df.index)
             filtered_column_indices = [df.columns.get_loc(col) for col in filtered_df.columns if col in df.columns]
@@ -329,18 +341,32 @@ def main():
     print("\nLLM-provided filtering instructions:")
     print(filter_instructions)
 
-    code_match = re.search(r"```(?:python)?\n(.*?)```", filter_instructions, re.DOTALL)
-    code_to_execute = code_match.group(1) if code_match else filter_instructions
+    json_match = re.search(r"```(?:json)?\n(.*?)```", filter_instructions, re.DOTALL)
+    filter_str = json_match.group(1) if json_match else filter_instructions
 
     try:
-        local_vars = {"df": df}
-        exec(code_to_execute, {}, local_vars)
-        filtered_df = local_vars.get("df", df)
-        if isinstance(filtered_df, pd.Series):
-            filtered_df = filtered_df.to_frame().T
-    except Exception as e:
-        print("Error executing filtering code:", e)
+        filter_json = json.loads(filter_str)
+        col = filter_json['column']
+        op = filter_json['operator']
+        val = filter_json['value']
+
+        if op == 'contains':
+            # pandas.query doesn't support str.contains, so we use a boolean mask.
+            filtered_df = df[df[col].str.contains(val, case=False, na=False)]
+        else:
+            # For dates, wrap value in quotes for the query
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                query_str = f"`{col}` {op} '{val}'"
+            else:
+                query_str = f"`{col}` {op} {val}"
+            filtered_df = df.query(query_str)
+            
+    except (json.JSONDecodeError, KeyError, Exception) as e:
+        print(f"Error applying filter: {e}. Using original dataframe.")
         filtered_df = df
+
+    if isinstance(filtered_df, pd.Series):
+        filtered_df = filtered_df.to_frame().T
 
     filtered_summary = get_dataset_summary(filtered_df)
     print("\nFiltered Dataset Summary:\n")
