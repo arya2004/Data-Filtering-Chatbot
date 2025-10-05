@@ -6,8 +6,9 @@ import time
 import json
 from dotenv import load_dotenv
 from openpyxl import load_workbook
-
+import operator
 import warnings
+
 warnings.filterwarnings('ignore')
 
 load_dotenv()
@@ -17,6 +18,8 @@ PREDICTED_EXCEL_PATH = os.getenv("PREDICTED_EXCEL_PATH", "./predicted.xlsx")
 INPUT_CSV_PATH = os.getenv("INPUT_CSV_PATH", "./input_table.csv")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+
+# ------------------- State Management -------------------
 def load_processing_state(state_file_path):
     """Load processing state from checkpoint file."""
     if os.path.exists(state_file_path):
@@ -27,6 +30,7 @@ def load_processing_state(state_file_path):
             return {"completed_indices": [], "results": {}}
     return {"completed_indices": [], "results": {}}
 
+
 def save_processing_state(state_file_path, state):
     """Save processing state to checkpoint file."""
     try:
@@ -35,6 +39,7 @@ def save_processing_state(state_file_path, state):
     except IOError as e:
         print(f"Warning: Could not save state checkpoint: {e}")
 
+
 def save_intermediate_result(results_file_path, idx, result_data):
     """Save intermediate result to temporary file."""
     try:
@@ -42,20 +47,18 @@ def save_intermediate_result(results_file_path, idx, result_data):
         if os.path.exists(results_file_path):
             with open(results_file_path, 'r') as f:
                 results = json.load(f)
-        
+
         results[str(idx)] = result_data
-        
+
         with open(results_file_path, 'w') as f:
             json.dump(results, f, indent=2)
     except (json.JSONDecodeError, IOError) as e:
         print(f"Warning: Could not save intermediate result: {e}")
 
-# ------------------- Utility Function -------------------
+
+# ------------------- Utility Functions -------------------
 def load_input_csv(path):
-    """
-    Load a CSV file and parse the 'Date' column if it exists.
-    Returns a pandas DataFrame.
-    """
+    """Load a CSV file and parse the 'Date' column if it exists."""
     try:
         df = pd.read_csv(path)
         if 'Date' in df.columns:
@@ -70,7 +73,7 @@ def detect_date_columns(df):
     date_columns = []
     for col in df.columns:
         col_lower = col.lower()
-        if any(date_word in col_lower for date_word in ['date', 'time', 'created', 'updated', 'timestamp']):
+        if any(word in col_lower for word in ['date', 'time', 'created', 'updated', 'timestamp']):
             try:
                 df[col] = pd.to_datetime(df[col])
                 date_columns.append(col)
@@ -87,30 +90,25 @@ def detect_date_columns(df):
                     pass
     return df, date_columns
 
+
 def get_dataset_summary(df):
-    summary_parts = []
-    
-    summary_parts.append(f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns")
-    
-    summary_parts.append("\nColumn Schema:")
+    summary_parts = [f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns", "\nColumn Schema:"]
     for col in df.columns:
         dtype = str(df[col].dtype)
         null_count = df[col].isnull().sum()
         unique_count = df[col].nunique()
         summary_parts.append(f"  - {col}: {dtype} (nulls: {null_count}, unique: {unique_count})")
-        
+
         if dtype == 'object' or 'category' in dtype:
             sample_values = df[col].dropna().unique()[:3]
             summary_parts.append(f"    Sample values: {list(sample_values)}")
         elif df[col].dtype in ['int64', 'float64']:
-            min_val = df[col].min()
-            max_val = df[col].max()
-            summary_parts.append(f"    Range: {min_val} to {max_val}")
-    
+            summary_parts.append(f"    Range: {df[col].min()} to {df[col].max()}")
+
     summary_parts.append("\nStatistical Summary:")
     summary_parts.append(df.describe(include='all').to_string())
-    
     return "\n".join(summary_parts)
+
 
 # ------------------- Filtering Instructions -------------------
 def get_filter_instructions(summary, question):
@@ -118,78 +116,56 @@ def get_filter_instructions(summary, question):
     q_lower = question.lower()
     if "recent" in q_lower or "latest" in q_lower:
         extra_instructions += (
-            "Note: When the question refers to 'recent' or 'latest entry', do not filter based on "
-            "the date column. Instead, select the last row of the dataframe using its original order "
-            "(e.g., use df.iloc[-1:]).\n"
+            "Note: For 'recent' or 'latest entry', select the last row (df.iloc[-1:]).\n"
         )
     if "early entry" in q_lower or "first entry" in q_lower or "earliest entry" in q_lower:
         extra_instructions += (
-            "Note: When the question refers to 'early entry', 'first entry', or 'earliest entry', do not filter "
-            "based on the date column. Instead, select the first row of the dataframe using its original order "
-            "(e.g., use df.iloc[:1]).\n"
+            "Note: For 'early' or 'first entry', select the first row (df.iloc[:1]).\n"
         )
-    
+
     prompt = (
         "You are an assistant that helps filter a dataset based on a user query.\n"
-        "You have access to a dataset with the following schema and summary:\n\n"
         f"{summary}\n\n"
-        "IMPORTANT: Use the exact column names shown in the schema above. "
-        "Pay attention to data types for appropriate comparisons.\n\n"
-        "Question to answer:\n"
-        f"\"{question}\"\n\n"
+        f"Question: \"{question}\"\n\n"
         f"{extra_instructions}"
-        "Return only a JSON object that represents the filter condition. The JSON should have 'column', 'operator', and 'value'.\n"
-        "Examples:\n"
-        '- For numeric: { "column": "ColumnName", "operator": ">", "value": 30 }\n'
-        '- For string: { "column": "ColumnName", "operator": "contains", "value": "text" }\n'
-        '- For date: { "column": "DateColumn", "operator": ">", "value": "2023-01-01" }\n\n'
-        "Supported operators: >, <, ==, !=, >=, <=, contains.\n"
-        "Make sure to return only the JSON object, optionally wrapped in triple backticks."
+        "Return only JSON with 'column', 'operator', and 'value'. "
+        "Supported operators: >, <, ==, !=, >=, <=, contains."
     )
-    
+
     response = client.chat.completions.create(
-        model=OPENAI_MODEL,  
+        model=OPENAI_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150,
-        temperature=0.0
+        temperature=0.0,
     )
-    
     return response.choices[0].message.content
+
 
 # ------------------- Final Answer -------------------
 def get_final_answer(filtered_df, filtered_summary, question):
     prompt = (
-        "You are an analytical assistant. Given the filtered dataset (its complete content and summary), "
-        "answer the question using as few words as possible. Output only the essential answer in minimal words or numbers on separate lines, "
-        "without any extra commentary. "
-        "IMPORTANT: Ensure that each number or word is reproduced exactly as given in the table. "
-        "Do not add timestamps, extra decimals, or any additional formatting. "
-        "For example, do not change '2019-01-01' to '2019-01-01 00:00:00' or '5' to '5.0'.\n\n"
-        "Filtered dataset (complete):\n"
+        "You are an analytical assistant. Given the filtered dataset and summary, "
+        "answer the question concisely with exact values.\n\n"
         f"{filtered_df.to_string(index=False)}\n\n"
-        "Filtered dataset summary:\n"
         f"{filtered_summary}\n\n"
-        f"Question: \"{question}\"\n\n"
-        "Please provide your answer in the following format: each answer on a new line with no additional text, exactly as in the table."
+        f"Question: \"{question}\""
     )
-    
     response = client.chat.completions.create(
-        model=OPENAI_MODEL, 
+        model=OPENAI_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150,
-        temperature=0.0
+        temperature=0.0,
     )
-    
     return response.choices[0].message.content
+
 
 # ------------------- Process Submission -------------------
 def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1):
     df = load_input_csv(csv_data_path)
     if df.empty:
         return
-    
+
     df, date_columns = detect_date_columns(df)
-    
     full_summary = get_dataset_summary(df)
 
     if os.path.exists(excel_file_path):
@@ -206,33 +182,29 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
         if col not in submission_df.columns:
             submission_df[col] = ""
 
-    # Load processing state for resume capability
+    state_file_path = "state.json"
+    results_file_path = "intermediate_results.json"
     processing_state = load_processing_state(state_file_path)
     completed_indices = set(processing_state.get("completed_indices", []))
-    
+
     if dev_start == -1 and dev_end == -1:
         indices_to_process = submission_df.index.tolist()
     else:
         indices_to_process = [i for i in submission_df.index if dev_start <= i <= dev_end]
-    
-    # Filter out already completed indices for resumable processing
+
     remaining_indices = [idx for idx in indices_to_process if idx not in completed_indices]
-    
+
     if completed_indices:
-        print(f"Resuming processing. Already completed: {len(completed_indices)} rows, Remaining: {len(remaining_indices)} rows")
-    
+        print(f"Resuming processing: {len(completed_indices)} done, {len(remaining_indices)} remaining")
+
     try:
         for idx in remaining_indices:
             row = submission_df.loc[idx]
             question = row["question"]
-            print(f"Processing question at index {idx}: {question}")
+            print(f"\nProcessing question {idx}: {question}")
 
             df_copy = df.copy()
-
             filter_instructions = get_filter_instructions(full_summary, question)
-            print("LLM-provided filtering instructions:")
-            print(filter_instructions)
-
             json_match = re.search(r"```(?:json)?\n(.*?)```", filter_instructions, re.DOTALL)
             filter_str = json_match.group(1) if json_match else filter_instructions
 
@@ -242,105 +214,86 @@ def process_submission(excel_file_path, csv_data_path, dev_start=-1, dev_end=-1)
                 op = filter_json['operator']
                 val = filter_json['value']
 
-                if op == 'contains':
-                    # pandas.query doesn't support str.contains, so we use a boolean mask.
-                    filtered_df = df_copy[df_copy[col].str.contains(val, case=False, na=False)]
-                else:
-                    # For dates, wrap value in quotes for the query
-                    if pd.api.types.is_datetime64_any_dtype(df_copy[col]):
-                        query_str = f"`{col}` {op} '{val}'"
+                OPS = {
+                    ">": operator.gt, "<": operator.lt, ">=": operator.ge,
+                    "<=": operator.le, "==": operator.eq, "!=": operator.ne
+                }
+
+                try:
+                    if op == "contains":
+                        filtered_df = df_copy[df_copy[col].astype(str).str.contains(str(val), case=False, na=False)]
+                    elif op in OPS:
+                        func = OPS[op]
+                        if pd.api.types.is_datetime64_any_dtype(df_copy[col]):
+                            val = pd.to_datetime(val)
+                        filtered_df = df_copy[func(df_copy[col], val)]
                     else:
-                        query_str = f"`{col}` {op} {val}"
-                    filtered_df = df_copy.query(query_str)
+                        print(f"Unsupported operator '{op}'. Using full dataset.")
+                        filtered_df = df_copy
+                except Exception as e:
+                    print(f"Error applying safe filter: {e}")
+                    filtered_df = df_copy
 
             except (json.JSONDecodeError, KeyError, Exception) as e:
-                print(f"Error applying filter: {e}. Using original dataframe.")
+                print(f"Error parsing filter JSON: {e}. Using full dataset.")
                 filtered_df = df_copy
 
             if not isinstance(filtered_df, pd.DataFrame):
-                print("Warning: Filtering code did not return a DataFrame. Using original dataset.")
                 filtered_df = df_copy
-            elif isinstance(filtered_df, pd.Series):
-                filtered_df = filtered_df.to_frame().T
 
             filtered_row_indices = list(filtered_df.index)
-            filtered_column_indices = [df.columns.get_loc(col) for col in filtered_df.columns if col in df.columns]
+            filtered_column_indices = [df.columns.get_loc(c) for c in filtered_df.columns if c in df.columns]
 
             filtered_summary = get_dataset_summary(filtered_df)
             generated_response = get_final_answer(filtered_df, filtered_summary, question)
 
-            # Save intermediate result before updating main dataframe
             result_data = {
                 "filtered_row_index": ", ".join(map(str, filtered_row_indices)),
                 "filtered_column_index": ", ".join(map(str, filtered_column_indices)),
-                "generated_response": generated_response
+                "generated_response": generated_response,
             }
-            save_intermediate_result(results_file_path, idx, result_data)
 
-            # Update submission dataframe
+            save_intermediate_result(results_file_path, idx, result_data)
             submission_df.at[idx, "filtered row index"] = result_data["filtered_row_index"]
             submission_df.at[idx, "filtered column index"] = result_data["filtered_column_index"]
             submission_df.at[idx, "generated response"] = result_data["generated_response"]
 
-            # Update processing state checkpoint
             completed_indices.add(idx)
             processing_state["completed_indices"] = list(completed_indices)
             save_processing_state(state_file_path, processing_state)
-            
-            print(f"Completed processing for index {idx}")
+
+            print(f"Completed index {idx}")
 
     except Exception as e:
         print(f"Processing interrupted: {e}")
-        print(f"State saved. You can resume by running the script again.")
+        print("State saved for resume.")
         return
 
-    # Build final Excel output only after all processing is complete
-    print("All processing complete. Building final Excel output...")
-    success = False
-    retries = 3
-    while not success and retries > 0:
-        try:
-            with pd.ExcelWriter(excel_file_path, engine="openpyxl", mode="w") as writer:
-                submission_df.to_excel(writer, index=False)
-            success = True
-            print(f"Final Excel file saved: {excel_file_path}")
-        except Exception as e:
-            print(f"Error saving final Excel file: {e}")
-            retries -= 1
-            time.sleep(2)
-            if retries == 0:
-                print(f"Failed to save final Excel file after multiple attempts.")
-                return
-
-    # Clean up state files after successful completion
+    print("All processing complete. Building Excel output...")
     try:
-        if os.path.exists(state_file_path):
-            os.remove(state_file_path)
-        if os.path.exists(results_file_path):
-            os.remove(results_file_path)
-        print("Processing state files cleaned up.")
-    except OSError:
-        print("Warning: Could not clean up temporary state files.")
+        with pd.ExcelWriter(excel_file_path, engine="openpyxl", mode="w") as writer:
+            submission_df.to_excel(writer, index=False)
+        print(f"Final Excel saved: {excel_file_path}")
+    except Exception as e:
+        print(f"Error saving Excel: {e}")
 
-    print("Submission processing complete.")
+    for f in ["state.json", "intermediate_results.json"]:
+        if os.path.exists(f):
+            os.remove(f)
+    print("Processing state files cleaned up.\nSubmission processing complete.")
 
-# ------------------- Main Function -------------------
+
+# ------------------- Main -------------------
 def main():
     df = load_input_csv(INPUT_CSV_PATH)
     if df.empty:
         return
-    
+
     df, date_columns = detect_date_columns(df)
-    
     full_summary = get_dataset_summary(df)
-    print("\nFull Dataset Summary:\n")
-    print(full_summary)
 
     question = "Give me all row numbers where 10 quantities were sold"
     filter_instructions = get_filter_instructions(full_summary, question)
-    print("\nLLM-provided filtering instructions:")
-    print(filter_instructions)
-
     json_match = re.search(r"```(?:json)?\n(.*?)```", filter_instructions, re.DOTALL)
     filter_str = json_match.group(1) if json_match else filter_instructions
 
@@ -350,23 +303,25 @@ def main():
         op = filter_json['operator']
         val = filter_json['value']
 
-        if op == 'contains':
-            # pandas.query doesn't support str.contains, so we use a boolean mask.
-            filtered_df = df[df[col].str.contains(val, case=False, na=False)]
-        else:
-            # For dates, wrap value in quotes for the query
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
-                query_str = f"`{col}` {op} '{val}'"
-            else:
-                query_str = f"`{col}` {op} {val}"
-            filtered_df = df.query(query_str)
-            
-    except (json.JSONDecodeError, KeyError, Exception) as e:
-        print(f"Error applying filter: {e}. Using original dataframe.")
-        filtered_df = df
+        OPS = {
+            ">": operator.gt, "<": operator.lt, ">=": operator.ge,
+            "<=": operator.le, "==": operator.eq, "!=": operator.ne
+        }
 
-    if isinstance(filtered_df, pd.Series):
-        filtered_df = filtered_df.to_frame().T
+        if op == "contains":
+            filtered_df = df[df[col].astype(str).str.contains(str(val), case=False, na=False)]
+        elif op in OPS:
+            func = OPS[op]
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                val = pd.to_datetime(val)
+            filtered_df = df[func(df[col], val)]
+        else:
+            print(f"Unsupported operator '{op}'. Using full dataset.")
+            filtered_df = df
+
+    except (json.JSONDecodeError, KeyError, Exception) as e:
+        print(f"Error applying filter: {e}. Using full dataset.")
+        filtered_df = df
 
     filtered_summary = get_dataset_summary(filtered_df)
     print("\nFiltered Dataset Summary:\n")
@@ -376,7 +331,6 @@ def main():
     print("\nFinal Answer:\n")
     print(final_answer)
 
-# ------------------- Entry Point -------------------
+
 if __name__ == "__main__":
-    # main()  # optional test run
     process_submission(PREDICTED_EXCEL_PATH, INPUT_CSV_PATH)
