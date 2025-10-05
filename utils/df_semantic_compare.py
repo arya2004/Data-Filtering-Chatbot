@@ -77,11 +77,20 @@ def _numeric_close(a: pd.Series, b: pd.Series, opts: CompareOptions) -> pd.Serie
     a_values = a.to_numpy()
     b_values = b.to_numpy()
     both_nan = pd.isna(a_values) & pd.isna(b_values)
-    # if both entire Series are numeric, use isclose; else exact with NaN-equal
     if pd.api.types.is_numeric_dtype(a) and pd.api.types.is_numeric_dtype(b):
         close = np.isclose(a_values, b_values, rtol=opts.rtol, atol=opts.atol, equal_nan=True)
         return pd.Series(close | both_nan, index=a.index)
     return pd.Series((a_values == b_values) | both_nan, index=a.index)
+
+def _sort_all_cols(df: pd.DataFrame) -> pd.DataFrame:
+    cols = list(df.columns)
+    if not cols:
+        return df
+    try:
+        return df.sort_values(by=cols).reset_index(drop=True)
+    except Exception:
+        key = df.apply(lambda row: tuple((v if isinstance(v, (int, float)) else str(v)) for v in row), axis=1)
+        return df.assign(__key=key).sort_values(by="__key").drop(columns="__key").reset_index(drop=True)
 
 def compare_dataframes(df_left: pd.DataFrame, df_right: pd.DataFrame, opts: CompareOptions = CompareOptions()) -> Dict[str, Any]:
     L = _maybe_coerce(df_left, opts)
@@ -106,6 +115,7 @@ def compare_dataframes(df_left: pd.DataFrame, df_right: pd.DataFrame, opts: Comp
     if report["column_mismatch"]:
         return report
 
+    # Keyed alignment
     if opts.keys:
         key = opts.keys
         if not set(key).issubset(L.columns) or not set(key).issubset(R.columns):
@@ -138,7 +148,30 @@ def compare_dataframes(df_left: pd.DataFrame, df_right: pd.DataFrame, opts: Comp
         report["equal"] = (total_mismatch == 0)
         return report
 
-    # Multiset (order-free) compare
+    # No keys: order-independent
+    if (opts.atol > 0 or opts.rtol > 0) and opts.ignore_row_order:
+        if L.shape != R.shape:
+            sigL = _row_signature_frame(L, opts).value_counts()
+            sigR = _row_signature_frame(R, opts).value_counts()
+            all_sigs = sigL.index.union(sigR.index)
+            left_only  = int((sigL.reindex(all_sigs, fill_value=0) - sigR.reindex(all_sigs, fill_value=0)).clip(lower=0).sum())
+            right_only = int((sigR.reindex(all_sigs, fill_value=0) - sigL.reindex(all_sigs, fill_value=0)).clip(lower=0).sum())
+            report["row_deltas"] = {"rows_only_in_left": left_only, "rows_only_in_right": right_only}
+            report["equal"] = (left_only == 0 and right_only == 0)
+            return report
+
+        Ls = _sort_all_cols(L)
+        Rs = _sort_all_cols(R)
+        mismatches = {}
+        for c in Ls.columns:
+            same = _numeric_close(Ls[c], Rs[c], opts)
+            mismatches[c] = int((~same).sum())
+        report["cell_mismatches"] = mismatches
+        report["row_deltas"] = {"rows_only_in_left": 0, "rows_only_in_right": 0}
+        report["equal"] = (sum(mismatches.values()) == 0)
+        return report
+
+    # Default multiset (exact or rounded via float_decimals)
     sigL = _row_signature_frame(L, opts).value_counts()
     sigR = _row_signature_frame(R, opts).value_counts()
     all_sigs = sigL.index.union(sigR.index)
